@@ -11,21 +11,32 @@ in the source distribution for its full text.
 
 #include "Object.h"
 #include "Process.h"
-#include "Settings.h"
+#include "Machine.h"
 
+typedef enum {
+   SCHEDCLASS_UNKNOWN = 0,
+
+   SCHEDCLASS_INTR_THREAD, /* interrupt thread */
+   SCHEDCLASS_REALTIME,
+   SCHEDCLASS_TIMESHARE, /* Regular scheduling */
+   SCHEDCLASS_IDLE,
+
+   MAX_SCHEDCLASS,
+} FreeBSDSchedClass;
 
 typedef struct FreeBSDProcess_ {
    Process super;
    int   jid;
    char* jname;
    char* emul;
+   FreeBSDSchedClass sched_class;
 } FreeBSDProcess;
 
 extern const ProcessClass FreeBSDProcess_class;
 
 extern const ProcessFieldData Process_fields[LAST_PROCESSFIELD];
 
-Process* FreeBSDProcess_new(const Settings* settings);
+Process* FreeBSDProcess_new(const Machine* host);
 
 void Process_delete(Object* cast);
 

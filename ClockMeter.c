@@ -13,8 +13,8 @@ in the source distribution for its full text.
 #include <sys/time.h>
 
 #include "CRT.h"
+#include "Machine.h"
 #include "Object.h"
-#include "ProcessList.h"
 
 
 static const int ClockMeter_attributes[] = {
@@ -22,11 +22,10 @@ static const int ClockMeter_attributes[] = {
 };
 
 static void ClockMeter_updateValues(Meter* this) {
-   const ProcessList* pl = this->pl;
+   const Machine* host = this->host;
 
    struct tm result;
-   const struct tm* lt = localtime_r(&pl->realtime.tv_sec, &result);
-   this->values[0] = lt->tm_hour * 60 + lt->tm_min;
+   const struct tm* lt = localtime_r(&host->realtime.tv_sec, &result);
    strftime(this->txtBuffer, sizeof(this->txtBuffer), "%H:%M:%S", lt);
 }
 
@@ -37,8 +36,9 @@ const MeterClass ClockMeter_class = {
    },
    .updateValues = ClockMeter_updateValues,
    .defaultMode = TEXT_METERMODE,
-   .maxItems = 1,
-   .total = 1440, /* 24*60 */
+   .supportedModes = (1 << TEXT_METERMODE) | (1 << LED_METERMODE),
+   .maxItems = 0,
+   .total = 0.0,
    .attributes = ClockMeter_attributes,
    .name = "Clock",
    .uiName = "Clock",

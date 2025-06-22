@@ -6,11 +6,17 @@ Released under the GNU GPLv2+, see the COPYING file
 in the source distribution for its full text.
 */
 
+#include "config.h" // IWYU pragma: keep
+
 #include "dragonflybsd/Platform.h"
 
+#include <devstat.h>
+#include <errno.h>
+#include <ifaddrs.h>
 #include <math.h>
 #include <time.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/sysctl.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -20,17 +26,23 @@ in the source distribution for its full text.
 #include "CPUMeter.h"
 #include "DateMeter.h"
 #include "DateTimeMeter.h"
+#include "FileDescriptorMeter.h"
 #include "HostnameMeter.h"
 #include "LoadAverageMeter.h"
+#include "Macros.h"
 #include "MemoryMeter.h"
 #include "MemorySwapMeter.h"
-#include "ProcessList.h"
+#include "ProcessTable.h"
 #include "SwapMeter.h"
 #include "SysArchMeter.h"
 #include "TasksMeter.h"
 #include "UptimeMeter.h"
+#include "XUtils.h"
+#include "dragonflybsd/DragonFlyBSDMachine.h"
 #include "dragonflybsd/DragonFlyBSDProcess.h"
-#include "dragonflybsd/DragonFlyBSDProcessList.h"
+#include "dragonflybsd/DragonFlyBSDProcessTable.h"
+#include "generic/fdstat_sysctl.h"
+
 
 const ScreenDefaults Platform_defaultScreens[] = {
    {
@@ -108,6 +120,9 @@ const MeterClass* const Platform_meterTypes[] = {
    &RightCPUs4Meter_class,
    &LeftCPUs8Meter_class,
    &RightCPUs8Meter_class,
+   &DiskIOMeter_class,
+   &NetworkIOMeter_class,
+   &FileDescriptorMeter_class,
    &BlankMeter_class,
    NULL
 };
@@ -157,7 +172,7 @@ void Platform_getLoadAverage(double* one, double* five, double* fifteen) {
    *fifteen = (double) loadAverage.ldavg[2] / loadAverage.fscale;
 }
 
-int Platform_getMaxPid(void) {
+pid_t Platform_getMaxPid(void) {
    int maxPid;
    size_t size = sizeof(maxPid);
    int err = sysctlbyname("kern.pid_max", &maxPid, &size, NULL, 0);
@@ -168,15 +183,16 @@ int Platform_getMaxPid(void) {
 }
 
 double Platform_setCPUValues(Meter* this, unsigned int cpu) {
-   const DragonFlyBSDProcessList* fpl = (const DragonFlyBSDProcessList*) this->pl;
-   unsigned int cpus = this->pl->activeCPUs;
+   const Machine* host = this->host;
+   const DragonFlyBSDMachine* dhost = (const DragonFlyBSDMachine*) host;
+   unsigned int cpus = host->activeCPUs;
    const CPUData* cpuData;
 
    if (cpus == 1) {
       // single CPU box has everything in fpl->cpus[0]
-      cpuData = &(fpl->cpus[0]);
+      cpuData = &(dhost->cpus[0]);
    } else {
-      cpuData = &(fpl->cpus[cpu]);
+      cpuData = &(dhost->cpus[cpu]);
    }
 
    double  percent;
@@ -184,18 +200,17 @@ double Platform_setCPUValues(Meter* this, unsigned int cpu) {
 
    v[CPU_METER_NICE]   = cpuData->nicePercent;
    v[CPU_METER_NORMAL] = cpuData->userPercent;
-   if (this->pl->settings->detailedCPUTime) {
+   if (host->settings->detailedCPUTime) {
       v[CPU_METER_KERNEL]  = cpuData->systemPercent;
       v[CPU_METER_IRQ]     = cpuData->irqPercent;
       this->curItems = 4;
-      percent = v[0] + v[1] + v[2] + v[3];
    } else {
-      v[2] = cpuData->systemAllPercent;
+      v[CPU_METER_KERNEL] = cpuData->systemAllPercent;
       this->curItems = 3;
-      percent = v[0] + v[1] + v[2];
    }
 
-   percent = isnan(percent) ? 0.0 : CLAMP(percent, 0.0, 100.0);
+   percent = sumPositiveValues(v, this->curItems);
+   percent = MINIMUM(percent, 100.0);
 
    v[CPU_METER_FREQUENCY] = NAN;
    v[CPU_METER_TEMPERATURE] = NAN;
@@ -204,22 +219,23 @@ double Platform_setCPUValues(Meter* this, unsigned int cpu) {
 }
 
 void Platform_setMemoryValues(Meter* this) {
-   // TODO
-   const ProcessList* pl = this->pl;
+   const Machine* host = this->host;
 
-   this->total = pl->totalMem;
-   this->values[MEMORY_METER_USED] = pl->usedMem;
-   this->values[MEMORY_METER_BUFFERS] = pl->buffersMem;
+   this->total = host->totalMem;
+   this->values[MEMORY_METER_USED] = host->usedMem;
    // this->values[MEMORY_METER_SHARED] = "shared memory, like tmpfs and shm"
-   this->values[MEMORY_METER_CACHE] = pl->cachedMem;
+   // this->values[MEMORY_METER_COMPRESSED] = "compressed memory, like zswap on linux"
+   this->values[MEMORY_METER_BUFFERS] = host->buffersMem;
+   this->values[MEMORY_METER_CACHE] = host->cachedMem;
    // this->values[MEMORY_METER_AVAILABLE] = "available memory"
 }
 
 void Platform_setSwapValues(Meter* this) {
-   const ProcessList* pl = this->pl;
-   this->total = pl->totalSwap;
-   this->values[SWAP_METER_USED] = pl->usedSwap;
-   this->values[SWAP_METER_CACHE] = NAN;
+   const Machine* host = this->host;
+   this->total = host->totalSwap;
+   this->values[SWAP_METER_USED] = host->usedSwap;
+   // mtr->values[SWAP_METER_CACHE] = "pages that are both in swap and RAM, like SwapCached on linux"
+   // mtr->values[SWAP_METER_FRONTSWAP] = "pages that are accounted to swap but stored elsewhere, like frontswap on linux"
 }
 
 char* Platform_getProcessEnv(pid_t pid) {
@@ -233,16 +249,95 @@ FileLocks_ProcessData* Platform_getProcessLocks(pid_t pid) {
    return NULL;
 }
 
+void Platform_getFileDescriptors(double* used, double* max) {
+   Generic_getFileDescriptors_sysctl(used, max);
+}
+
 bool Platform_getDiskIO(DiskIOData* data) {
-   // TODO
-   (void)data;
-   return false;
+   struct statinfo dev_stats = { 0 };
+   struct device_selection* dev_sel = NULL;
+   int n_selected, n_selections;
+   long sel_gen;
+
+   dev_stats.dinfo = xCalloc(1, sizeof(struct devinfo));
+
+   int ret = getdevs(&dev_stats);
+   if (ret < 0) {
+      CRT_debug("getdevs() failed [%d]: %s", ret, strerror(errno));
+      free(dev_stats.dinfo);
+      return false;
+   }
+
+   ret = selectdevs(&dev_sel, &n_selected, &n_selections, &sel_gen,
+         dev_stats.dinfo->generation, dev_stats.dinfo->devices, dev_stats.dinfo->numdevs,
+         NULL, 0, NULL, 0, DS_SELECT_ONLY, dev_stats.dinfo->numdevs, 1);
+   if (ret < 0) {
+      CRT_debug("selectdevs() failed [%d]: %s", ret, strerror(errno));
+      free(dev_stats.dinfo);
+      return false;
+   }
+
+   uint64_t bytesReadSum = 0;
+   uint64_t bytesWriteSum = 0;
+   uint64_t busyMsTimeSum = 0;
+   uint64_t numDisks = 0;
+
+   for (int i = 0; i < dev_stats.dinfo->numdevs; i++) {
+      const struct devstat* device = &dev_stats.dinfo->devices[dev_sel[i].position];
+
+      switch (device->device_type & DEVSTAT_TYPE_MASK) {
+      case DEVSTAT_TYPE_DIRECT:
+      case DEVSTAT_TYPE_SEQUENTIAL:
+      case DEVSTAT_TYPE_WORM:
+      case DEVSTAT_TYPE_CDROM:
+      case DEVSTAT_TYPE_OPTICAL:
+      case DEVSTAT_TYPE_CHANGER:
+      case DEVSTAT_TYPE_STORARRAY:
+      case DEVSTAT_TYPE_FLOPPY:
+         break;
+      default:
+         continue;
+      }
+
+      bytesReadSum  += device->bytes_read;
+      bytesWriteSum += device->bytes_written;
+      busyMsTimeSum += (device->busy_time.tv_sec * 1000 + device->busy_time.tv_usec / 1000);
+      numDisks++;
+   }
+
+   data->totalBytesRead = bytesReadSum;
+   data->totalBytesWritten = bytesWriteSum;
+   data->totalMsTimeSpend = busyMsTimeSum;
+   data->numDisks = numDisks;
+
+   free(dev_stats.dinfo);
+   return true;
 }
 
 bool Platform_getNetworkIO(NetworkIOData* data) {
-   // TODO
-   (void)data;
-   return false;
+   struct ifaddrs* ifaddrs = NULL;
+
+   if (getifaddrs(&ifaddrs) != 0)
+      return false;
+
+   for (const struct ifaddrs* ifa = ifaddrs; ifa; ifa = ifa->ifa_next) {
+      if (!ifa->ifa_addr)
+         continue;
+      if (ifa->ifa_addr->sa_family != AF_LINK)
+         continue;
+      if (ifa->ifa_flags & IFF_LOOPBACK)
+         continue;
+
+      const struct if_data* ifd = (const struct if_data*)ifa->ifa_data;
+
+      data->bytesReceived += ifd->ifi_ibytes;
+      data->packetsReceived += ifd->ifi_ipackets;
+      data->bytesTransmitted += ifd->ifi_obytes;
+      data->packetsTransmitted += ifd->ifi_opackets;
+   }
+
+   freeifaddrs(ifaddrs);
+   return true;
 }
 
 void Platform_getBattery(double* percent, ACPresence* isOnAC) {

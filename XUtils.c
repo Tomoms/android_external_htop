@@ -12,6 +12,7 @@ in the source distribution for its full text.
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -19,6 +20,7 @@ in the source distribution for its full text.
 #include <unistd.h>
 
 #include "CRT.h"
+#include "Macros.h"
 
 
 void fail(void) {
@@ -61,9 +63,16 @@ void* xCalloc(size_t nmemb, size_t size) {
 
 void* xRealloc(void* ptr, size_t size) {
    assert(size > 0);
-   void* data = realloc(ptr, size); // deepcode ignore MemoryLeakOnRealloc: this goes to fail()
+   void* data = realloc(ptr, size);
    if (!data) {
-      free(ptr);
+      /* free'ing ptr here causes an indirect memory leak if pointers
+       * are held as part of an potential array referenced in ptr.
+       * In GCC 14 -fanalyzer recognizes this leak, but fails to
+       * ignore it given that this path ends in a noreturn function.
+       * Thus to avoid this confusing diagnostic we opt to leave
+       * that pointer alone instead.
+       */
+      // free(ptr);
       fail();
    }
    return data;
@@ -177,13 +186,13 @@ void String_freeArray(char** s) {
    free(s);
 }
 
-char* String_readLine(FILE* fd) {
+char* String_readLine(FILE* fp) {
    const size_t step = 1024;
    size_t bufSize = step;
    char* buffer = xMalloc(step + 1);
    char* at = buffer;
    for (;;) {
-      const char* ok = fgets(at, step + 1, fd);
+      const char* ok = fgets(at, step + 1, fp);
       if (!ok) {
          free(buffer);
          return NULL;
@@ -193,7 +202,7 @@ char* String_readLine(FILE* fd) {
          *newLine = '\0';
          return buffer;
       } else {
-         if (feof(fd)) {
+         if (feof(fp)) {
             return buffer;
          }
       }
@@ -229,6 +238,8 @@ int xAsprintf(char** strp, const char* fmt, ...) {
 }
 
 int xSnprintf(char* buf, size_t len, const char* fmt, ...) {
+   assert(len > 0);
+
    va_list vl;
    va_start(vl, fmt);
    int n = vsnprintf(buf, len, fmt, vl);
@@ -265,6 +276,7 @@ char* xStrndup(const char* str, size_t len) {
    return data;
 }
 
+ATTR_ACCESS3_W(2, 3)
 static ssize_t readfd_internal(int fd, void* buffer, size_t count) {
    if (!count) {
       close(fd);
@@ -281,10 +293,13 @@ static ssize_t readfd_internal(int fd, void* buffer, size_t count) {
             continue;
 
          close(fd);
+         *((char*)buffer) = '\0';
          return -errno;
       }
 
       if (res > 0) {
+         assert((size_t)res <= count);
+
          buffer = ((char*)buffer) + res;
          count -= (size_t)res;
          alreadyRead += res;
@@ -336,3 +351,54 @@ ssize_t full_write(int fd, const void* buf, size_t count) {
 
    return written;
 }
+
+/* Compares floating point values for ordering data entries. In this function,
+   NaN is considered "less than" any other floating point value (regardless of
+   sign), and two NaNs are considered "equal" regardless of payload. */
+int compareRealNumbers(double a, double b) {
+   int result = isgreater(a, b) - isgreater(b, a);
+   if (result)
+      return result;
+   return !isNaN(a) - !isNaN(b);
+}
+
+/* Computes the sum of all positive floating point values in an array.
+   NaN values in the array are skipped. The returned sum will always be
+   nonnegative. */
+double sumPositiveValues(const double* array, size_t count) {
+   double sum = 0.0;
+   for (size_t i = 0; i < count; i++) {
+      if (isPositive(array[i]))
+         sum += array[i];
+   }
+   return sum;
+}
+
+/* Counts the number of digits needed to print "n" with a given base.
+   If "n" is zero, returns 1. This function expects small numbers to
+   appear often, hence it uses a O(log(n)) time algorithm. */
+size_t countDigits(size_t n, size_t base) {
+   assert(base > 1);
+   size_t res = 1;
+   for (size_t limit = base; n >= limit; limit *= base) {
+      res++;
+      if (base && limit > SIZE_MAX / base) {
+         break;
+      }
+   }
+   return res;
+}
+
+#if !defined(HAVE_BUILTIN_CTZ)
+// map a bit value mod 37 to its position
+static const uint8_t mod37BitPosition[] = {
+  32, 0, 1, 26, 2, 23, 27, 0, 3, 16, 24, 30, 28, 11, 0, 13, 4,
+  7, 17, 0, 25, 22, 31, 15, 29, 10, 12, 6, 0, 21, 14, 9, 5,
+  20, 8, 19, 18
+};
+
+/* Returns the number of trailing zero bits */
+unsigned int countTrailingZeros(unsigned int x) {
+   return mod37BitPosition[(-x & x) % 37];
+}
+#endif

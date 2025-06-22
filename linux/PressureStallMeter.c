@@ -6,6 +6,8 @@ Released under the GNU GPLv2+, see the COPYING file
 in the source distribution for its full text.
 */
 
+#include "config.h" // IWYU pragma: keep
+
 #include "linux/PressureStallMeter.h"
 
 #include <stdbool.h>
@@ -31,6 +33,8 @@ static void PressureStallMeter_updateValues(Meter* this) {
       file = "cpu";
    } else if (strstr(Meter_name(this), "IO")) {
       file = "io";
+   } else if (strstr(Meter_name(this), "IRQ")) {
+      file = "irq";
    } else {
       file = "memory";
    }
@@ -71,6 +75,7 @@ const MeterClass PressureStallCPUSomeMeter_class = {
    },
    .updateValues = PressureStallMeter_updateValues,
    .defaultMode = TEXT_METERMODE,
+   .supportedModes = METERMODE_DEFAULT_SUPPORTED,
    .maxItems = 3,
    .total = 100.0,
    .attributes = PressureStallMeter_attributes,
@@ -88,6 +93,7 @@ const MeterClass PressureStallIOSomeMeter_class = {
    },
    .updateValues = PressureStallMeter_updateValues,
    .defaultMode = TEXT_METERMODE,
+   .supportedModes = METERMODE_DEFAULT_SUPPORTED,
    .maxItems = 3,
    .total = 100.0,
    .attributes = PressureStallMeter_attributes,
@@ -105,6 +111,7 @@ const MeterClass PressureStallIOFullMeter_class = {
    },
    .updateValues = PressureStallMeter_updateValues,
    .defaultMode = TEXT_METERMODE,
+   .supportedModes = METERMODE_DEFAULT_SUPPORTED,
    .maxItems = 3,
    .total = 100.0,
    .attributes = PressureStallMeter_attributes,
@@ -112,6 +119,24 @@ const MeterClass PressureStallIOFullMeter_class = {
    .uiName = "PSI full IO",
    .caption = "PSI full IO:     ",
    .description = "Pressure Stall Information, full io"
+};
+
+const MeterClass PressureStallIRQFullMeter_class = {
+   .super = {
+      .extends = Class(Meter),
+      .delete = Meter_delete,
+      .display = PressureStallMeter_display,
+   },
+   .updateValues = PressureStallMeter_updateValues,
+   .defaultMode = TEXT_METERMODE,
+   .supportedModes = METERMODE_DEFAULT_SUPPORTED,
+   .maxItems = 3,
+   .total = 100.0,
+   .attributes = PressureStallMeter_attributes,
+   .name = "PressureStallIRQFull",
+   .uiName = "PSI full IRQ",
+   .caption = "PSI full IRQ:    ",
+   .description = "Pressure Stall Information, full irq"
 };
 
 const MeterClass PressureStallMemorySomeMeter_class = {
@@ -122,6 +147,7 @@ const MeterClass PressureStallMemorySomeMeter_class = {
    },
    .updateValues = PressureStallMeter_updateValues,
    .defaultMode = TEXT_METERMODE,
+   .supportedModes = METERMODE_DEFAULT_SUPPORTED,
    .maxItems = 3,
    .total = 100.0,
    .attributes = PressureStallMeter_attributes,
@@ -139,6 +165,7 @@ const MeterClass PressureStallMemoryFullMeter_class = {
    },
    .updateValues = PressureStallMeter_updateValues,
    .defaultMode = TEXT_METERMODE,
+   .supportedModes = METERMODE_DEFAULT_SUPPORTED,
    .maxItems = 3,
    .total = 100.0,
    .attributes = PressureStallMeter_attributes,

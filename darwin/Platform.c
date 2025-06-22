@@ -14,16 +14,30 @@ in the source distribution for its full text.
 #include <math.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <net/if.h>
+#include <net/if_types.h>
+#include <net/route.h>
+#include <sys/socket.h>
+#include <mach/port.h>
+
+#include <CoreFoundation/CFBase.h>
+#include <CoreFoundation/CFDictionary.h>
+#include <CoreFoundation/CFNumber.h>
 #include <CoreFoundation/CFString.h>
 #include <CoreFoundation/CoreFoundation.h>
+
+#include <IOKit/IOKitLib.h>
+#include <IOKit/IOTypes.h>
 #include <IOKit/ps/IOPowerSources.h>
 #include <IOKit/ps/IOPSKeys.h>
+#include <IOKit/storage/IOBlockStorageDriver.h>
 
 #include "ClockMeter.h"
 #include "CPUMeter.h"
 #include "CRT.h"
 #include "DateMeter.h"
 #include "DateTimeMeter.h"
+#include "FileDescriptorMeter.h"
 #include "HostnameMeter.h"
 #include "LoadAverageMeter.h"
 #include "Macros.h"
@@ -34,8 +48,9 @@ in the source distribution for its full text.
 #include "SysArchMeter.h"
 #include "TasksMeter.h"
 #include "UptimeMeter.h"
-#include "darwin/DarwinProcessList.h"
+#include "darwin/DarwinMachine.h"
 #include "darwin/PlatformHelpers.h"
+#include "generic/fdstat_sysctl.h"
 #include "zfs/ZfsArcMeter.h"
 #include "zfs/ZfsCompressedArcMeter.h"
 
@@ -126,16 +141,18 @@ const MeterClass* const Platform_meterTypes[] = {
    &RightCPUs8Meter_class,
    &ZfsArcMeter_class,
    &ZfsCompressedArcMeter_class,
+   &DiskIOMeter_class,
+   &NetworkIOMeter_class,
+   &FileDescriptorMeter_class,
    &BlankMeter_class,
    NULL
 };
 
-static double Platform_nanosecondsPerMachTick = 1.0;
-
 static double Platform_nanosecondsPerSchedulerTick = -1;
 
+static mach_port_t iokit_port; // the mach port used to initiate communication with IOKit
+
 bool Platform_init(void) {
-   Platform_nanosecondsPerMachTick = Platform_calculateNanosecondsPerMachTick();
 
    // Determine the number of scheduler clock ticks per second
    errno = 0;
@@ -149,12 +166,6 @@ bool Platform_init(void) {
    Platform_nanosecondsPerSchedulerTick = nanos_per_sec / scheduler_ticks_per_sec;
 
    return true;
-}
-
-// Converts ticks in the Mach "timebase" to nanoseconds.
-// See `mach_timebase_info`, as used to define the `Platform_nanosecondsPerMachTick` constant.
-uint64_t Platform_machTicksToNanoseconds(uint64_t mach_ticks) {
-   return (uint64_t) ((double) mach_ticks * Platform_nanosecondsPerMachTick);
 }
 
 // Converts "scheduler ticks" to nanoseconds.
@@ -200,19 +211,19 @@ void Platform_getLoadAverage(double* one, double* five, double* fifteen) {
    }
 }
 
-int Platform_getMaxPid(void) {
+pid_t Platform_getMaxPid(void) {
    /* http://opensource.apple.com/source/xnu/xnu-2782.1.97/bsd/sys/proc_internal.hh */
    return 99999;
 }
 
 static double Platform_setCPUAverageValues(Meter* mtr) {
-   const ProcessList* dpl = mtr->pl;
-   unsigned int activeCPUs = dpl->activeCPUs;
+   const Machine* host = mtr->host;
+   unsigned int activeCPUs = host->activeCPUs;
    double sumNice = 0.0;
    double sumNormal = 0.0;
    double sumKernel = 0.0;
    double sumPercent = 0.0;
-   for (unsigned int i = 1; i <= dpl->existingCPUs; i++) {
+   for (unsigned int i = 1; i <= host->existingCPUs; i++) {
       sumPercent += Platform_setCPUValues(mtr, i);
       sumNice    += mtr->values[CPU_METER_NICE];
       sumNormal  += mtr->values[CPU_METER_NORMAL];
@@ -230,9 +241,9 @@ double Platform_setCPUValues(Meter* mtr, unsigned int cpu) {
       return Platform_setCPUAverageValues(mtr);
    }
 
-   const DarwinProcessList* dpl = (const DarwinProcessList*)mtr->pl;
-   const processor_cpu_load_info_t prev = &dpl->prev_load[cpu - 1];
-   const processor_cpu_load_info_t curr = &dpl->curr_load[cpu - 1];
+   const DarwinMachine* dhost = (const DarwinMachine*) mtr->host;
+   const processor_cpu_load_info_t prev = &dhost->prev_load[cpu - 1];
+   const processor_cpu_load_info_t curr = &dhost->curr_load[cpu - 1];
    double total = 0;
 
    /* Take the sums */
@@ -240,12 +251,18 @@ double Platform_setCPUValues(Meter* mtr, unsigned int cpu) {
       total += (double)curr->cpu_ticks[i] - (double)prev->cpu_ticks[i];
    }
 
-   mtr->values[CPU_METER_NICE]
-      = ((double)curr->cpu_ticks[CPU_STATE_NICE] - (double)prev->cpu_ticks[CPU_STATE_NICE]) * 100.0 / total;
-   mtr->values[CPU_METER_NORMAL]
-      = ((double)curr->cpu_ticks[CPU_STATE_USER] - (double)prev->cpu_ticks[CPU_STATE_USER]) * 100.0 / total;
-   mtr->values[CPU_METER_KERNEL]
-      = ((double)curr->cpu_ticks[CPU_STATE_SYSTEM] - (double)prev->cpu_ticks[CPU_STATE_SYSTEM]) * 100.0 / total;
+   if (total > 1e-6) {
+      mtr->values[CPU_METER_NICE]
+         = ((double)curr->cpu_ticks[CPU_STATE_NICE] - (double)prev->cpu_ticks[CPU_STATE_NICE]) * 100.0 / total;
+      mtr->values[CPU_METER_NORMAL]
+         = ((double)curr->cpu_ticks[CPU_STATE_USER] - (double)prev->cpu_ticks[CPU_STATE_USER]) * 100.0 / total;
+      mtr->values[CPU_METER_KERNEL]
+         = ((double)curr->cpu_ticks[CPU_STATE_SYSTEM] - (double)prev->cpu_ticks[CPU_STATE_SYSTEM]) * 100.0 / total;
+   } else {
+      mtr->values[CPU_METER_NICE] = 0.0;
+      mtr->values[CPU_METER_NORMAL] = 0.0;
+      mtr->values[CPU_METER_KERNEL] = 0.0;
+   }
 
    mtr->curItems = 3;
 
@@ -259,14 +276,30 @@ double Platform_setCPUValues(Meter* mtr, unsigned int cpu) {
 }
 
 void Platform_setMemoryValues(Meter* mtr) {
-   const DarwinProcessList* dpl = (const DarwinProcessList*)mtr->pl;
-   const struct vm_statistics* vm = &dpl->vm_stats;
+   const DarwinMachine* dhost = (const DarwinMachine*) mtr->host;
+#ifdef HAVE_STRUCT_VM_STATISTICS64
+   const struct vm_statistics64* vm = &dhost->vm_stats;
+#else
+   const struct vm_statistics* vm = &dhost->vm_stats;
+#endif
    double page_K = (double)vm_page_size / (double)1024;
 
-   mtr->total = dpl->host_info.max_mem / 1024;
+   mtr->total = dhost->host_info.max_mem / 1024;
+#ifdef HAVE_STRUCT_VM_STATISTICS64
+   natural_t used = vm->active_count + vm->inactive_count +
+              vm->speculative_count + vm->wire_count +
+              vm->compressor_page_count - vm->purgeable_count - vm->external_page_count;
+   mtr->values[MEMORY_METER_USED] = (double)(used - vm->compressor_page_count) * page_K;
+#else
    mtr->values[MEMORY_METER_USED] = (double)(vm->active_count + vm->wire_count) * page_K;
-   mtr->values[MEMORY_METER_BUFFERS] = (double)vm->purgeable_count * page_K;
+#endif
    // mtr->values[MEMORY_METER_SHARED] = "shared memory, like tmpfs and shm"
+#ifdef HAVE_STRUCT_VM_STATISTICS64
+   mtr->values[MEMORY_METER_COMPRESSED] = (double)vm->compressor_page_count * page_K;
+#else
+   // mtr->values[MEMORY_METER_COMPRESSED] = "compressed memory, like zswap on linux"
+#endif
+   mtr->values[MEMORY_METER_BUFFERS] = (double)vm->purgeable_count * page_K;
    mtr->values[MEMORY_METER_CACHE] = (double)vm->inactive_count * page_K;
    // mtr->values[MEMORY_METER_AVAILABLE] = "available memory"
 }
@@ -279,18 +312,20 @@ void Platform_setSwapValues(Meter* mtr) {
 
    mtr->total = swapused.xsu_total / 1024;
    mtr->values[SWAP_METER_USED] = swapused.xsu_used / 1024;
+   // mtr->values[SWAP_METER_CACHE] = "pages that are both in swap and RAM, like SwapCached on linux"
+   // mtr->values[SWAP_METER_FRONTSWAP] = "pages that are accounted to swap but stored elsewhere, like frontswap on linux"
 }
 
 void Platform_setZfsArcValues(Meter* this) {
-   const DarwinProcessList* dpl = (const DarwinProcessList*) this->pl;
+   const DarwinMachine* dhost = (const DarwinMachine*) this->host;
 
-   ZfsArcMeter_readStats(this, &(dpl->zfs));
+   ZfsArcMeter_readStats(this, &dhost->zfs);
 }
 
 void Platform_setZfsCompressedArcValues(Meter* this) {
-   const DarwinProcessList* dpl = (const DarwinProcessList*) this->pl;
+   const DarwinMachine* dhost = (const DarwinMachine*) this->host;
 
-   ZfsCompressedArcMeter_readStats(this, &(dpl->zfs));
+   ZfsCompressedArcMeter_readStats(this, &dhost->zfs);
 }
 
 char* Platform_getProcessEnv(pid_t pid) {
@@ -349,16 +384,155 @@ FileLocks_ProcessData* Platform_getProcessLocks(pid_t pid) {
    return NULL;
 }
 
-bool Platform_getDiskIO(DiskIOData* data) {
-   // TODO
-   (void)data;
-   return false;
+void Platform_getFileDescriptors(double* used, double* max) {
+   Generic_getFileDescriptors_sysctl(used, max);
 }
 
+bool Platform_getDiskIO(DiskIOData* data) {
+
+   io_iterator_t drive_list;
+
+   /* Get the list of all drives */
+   if (IOServiceGetMatchingServices(iokit_port, IOServiceMatching("IOBlockStorageDriver"), &drive_list))
+      return false;
+
+   uint64_t read_sum = 0, write_sum = 0, timeSpend_sum = 0;
+   uint64_t numDisks = 0;
+
+   io_registry_entry_t drive;
+   while ((drive = IOIteratorNext(drive_list)) != 0) {
+      CFMutableDictionaryRef properties_tmp = NULL;
+
+      /* Get the properties of this drive */
+      if (IORegistryEntryCreateCFProperties(drive, &properties_tmp, kCFAllocatorDefault, 0)) {
+         IOObjectRelease(drive);
+         IOObjectRelease(drive_list);
+         return false;
+      }
+
+      if (!properties_tmp) {
+         IOObjectRelease(drive);
+         continue;
+      }
+
+      CFDictionaryRef properties = properties_tmp;
+
+      /* Get the statistics of this drive */
+      CFDictionaryRef statistics = (CFDictionaryRef) CFDictionaryGetValue(properties, CFSTR(kIOBlockStorageDriverStatisticsKey));
+
+      if (!statistics) {
+         CFRelease(properties);
+         IOObjectRelease(drive);
+         continue;
+      }
+
+      numDisks++;
+
+      CFNumberRef number;
+      uint64_t value;
+
+      /* Get bytes read */
+      number = (CFNumberRef) CFDictionaryGetValue(statistics, CFSTR(kIOBlockStorageDriverStatisticsBytesReadKey));
+      if (number != 0) {
+         CFNumberGetValue(number, kCFNumberSInt64Type, &value);
+         read_sum += value;
+      }
+
+      /* Get bytes written */
+      number = (CFNumberRef) CFDictionaryGetValue(statistics, CFSTR(kIOBlockStorageDriverStatisticsBytesWrittenKey));
+      if (number != 0) {
+         CFNumberGetValue(number, kCFNumberSInt64Type, &value);
+         write_sum += value;
+      }
+
+      /* Get total read time (in ns) */
+      number = (CFNumberRef) CFDictionaryGetValue(statistics, CFSTR(kIOBlockStorageDriverStatisticsTotalReadTimeKey));
+      if (number != 0) {
+         CFNumberGetValue(number, kCFNumberSInt64Type, &value);
+         timeSpend_sum += value;
+      }
+
+      /* Get total write time (in ns) */
+      number = (CFNumberRef) CFDictionaryGetValue(statistics, CFSTR(kIOBlockStorageDriverStatisticsTotalWriteTimeKey));
+      if (number != 0) {
+         CFNumberGetValue(number, kCFNumberSInt64Type, &value);
+         timeSpend_sum += value;
+      }
+
+      CFRelease(properties);
+      IOObjectRelease(drive);
+   }
+
+   data->totalBytesRead = read_sum;
+   data->totalBytesWritten = write_sum;
+   data->totalMsTimeSpend = timeSpend_sum / 1e6; /* Convert from ns to ms */
+   data->numDisks = numDisks;
+
+   if (drive_list)
+      IOObjectRelease(drive_list);
+
+   return true;
+}
+
+/* Caution: Given that interfaces are dynamic, and it is not possible to get statistics on interfaces that no longer exist,
+   if some interface disappears between the time of two samples, the values of the second sample may be lower than those of
+   the first one. */
 bool Platform_getNetworkIO(NetworkIOData* data) {
-   // TODO
-   (void)data;
-   return false;
+   int mib[6] = {CTL_NET,
+      PF_ROUTE, /* routing messages */
+      0, /* protocol number, currently always 0 */
+      0, /* select all address families */
+      NET_RT_IFLIST2, /* interface list with addresses */
+      0};
+
+   for (size_t retry = 0; retry < 4; retry++) {
+      size_t len = 0;
+
+      /* Determine len */
+      if (sysctl(mib, ARRAYSIZE(mib), NULL, &len, NULL, 0) < 0 || len == 0)
+         return false;
+
+      len += 16 * retry * retry * sizeof(struct if_msghdr2);
+      char *buf = xMalloc(len);
+
+      if (sysctl(mib, ARRAYSIZE(mib), buf, &len, NULL, 0) < 0) {
+         free(buf);
+         if (errno == ENOMEM && retry < 3)
+            continue;
+         else
+            return false;
+      }
+
+      uint64_t bytesReceived_sum = 0, packetsReceived_sum = 0, bytesTransmitted_sum = 0, packetsTransmitted_sum = 0;
+
+      for (char *next = buf; next < buf + len;) {
+         void *tmp = (void*) next;
+         struct if_msghdr *ifm = (struct if_msghdr*) tmp;
+
+         next += ifm->ifm_msglen;
+
+         if (ifm->ifm_type != RTM_IFINFO2)
+            continue;
+
+         struct if_msghdr2 *ifm2 = (struct if_msghdr2*) ifm;
+
+         if (ifm2->ifm_data.ifi_type != IFT_LOOP) { /* do not count loopback traffic */
+            bytesReceived_sum += ifm2->ifm_data.ifi_ibytes;
+            packetsReceived_sum += ifm2->ifm_data.ifi_ipackets;
+            bytesTransmitted_sum += ifm2->ifm_data.ifi_obytes;
+            packetsTransmitted_sum += ifm2->ifm_data.ifi_opackets;
+         }
+      }
+
+      data->bytesReceived = bytesReceived_sum;
+      data->packetsReceived = packetsReceived_sum;
+      data->bytesTransmitted = bytesTransmitted_sum;
+      data->packetsTransmitted = packetsTransmitted_sum;
+
+      free(buf);
+   }
+
+   return true;
 }
 
 void Platform_getBattery(double* percent, ACPresence* isOnAC) {

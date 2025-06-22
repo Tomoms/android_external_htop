@@ -38,10 +38,6 @@ extern const MeterClass* const Platform_meterTypes[];
 
 bool Platform_init(void);
 
-// Converts ticks in the Mach "timebase" to nanoseconds.
-// See `mach_timebase_info`, as used to define the `Platform_nanosecondsPerMachTick` constant.
-uint64_t Platform_machTicksToNanoseconds(uint64_t mach_ticks);
-
 // Converts "scheduler ticks" to nanoseconds.
 // See `sysconf(_SC_CLK_TCK)`, as used to define the `Platform_nanosecondsPerSchedulerTick` constant.
 double Platform_schedulerTicksToNanoseconds(const double scheduler_ticks);
@@ -54,7 +50,7 @@ int Platform_getUptime(void);
 
 void Platform_getLoadAverage(double* one, double* five, double* fifteen);
 
-int Platform_getMaxPid(void);
+pid_t Platform_getMaxPid(void);
 
 double Platform_setCPUValues(Meter* mtr, unsigned int cpu);
 
@@ -69,6 +65,8 @@ void Platform_setZfsCompressedArcValues(Meter* this);
 char* Platform_getProcessEnv(pid_t pid);
 
 FileLocks_ProcessData* Platform_getProcessLocks(pid_t pid);
+
+void Platform_getFileDescriptors(double* used, double* max);
 
 bool Platform_getDiskIO(DiskIOData* data);
 
@@ -116,12 +114,24 @@ static inline Hashtable* Platform_dynamicColumns(void) {
 
 static inline void Platform_dynamicColumnsDone(ATTR_UNUSED Hashtable* table) { }
 
-static inline const char* Platform_dynamicColumnInit(ATTR_UNUSED unsigned int key) {
+static inline const char* Platform_dynamicColumnName(ATTR_UNUSED unsigned int key) {
    return NULL;
 }
 
 static inline bool Platform_dynamicColumnWriteField(ATTR_UNUSED const Process* proc, ATTR_UNUSED RichString* str, ATTR_UNUSED unsigned int key) {
    return false;
 }
+
+static inline Hashtable* Platform_dynamicScreens(void) {
+   return NULL;
+}
+
+static inline void Platform_defaultDynamicScreens(ATTR_UNUSED Settings* settings) { }
+
+static inline void Platform_addDynamicScreen(ATTR_UNUSED ScreenSettings* ss) { }
+
+static inline void Platform_addDynamicScreenAvailableColumns(ATTR_UNUSED Panel* availableColumns, ATTR_UNUSED const char* screen) { }
+
+static inline void Platform_dynamicScreensDone(ATTR_UNUSED Hashtable* screens) { }
 
 #endif
