@@ -5,6 +5,8 @@ Released under the GNU GPLv2+, see the COPYING file
 in the source distribution for its full text.
 */
 
+#include "config.h" // IWYU pragma: keep
+
 #include "MetersPanel.h"
 
 #include <stdlib.h>
@@ -20,8 +22,8 @@ in the source distribution for its full text.
 
 // Note: In code the meters are known to have bar/text/graph "Modes", but in UI
 // we call them "Styles".
-static const char* const MetersFunctions[] = {"Style ", "Move  ", "                                         ", "Delete", "Done  ", NULL};
-static const char* const MetersKeys[] = {"Space", "Enter", "", "Del", "F10"};
+static const char* const MetersFunctions[] = {"Style ", "Move  ", "                                       ", "Delete", "Done  ", NULL};
+static const char* const MetersKeys[] = {"Space", "Enter", "  ", "Del", "F10"};
 static const int MetersEvents[] = {' ', 13, ERR, KEY_DC, KEY_F(10)};
 
 // We avoid UTF-8 arrows ← → here as they might display full-width on Chinese
@@ -41,14 +43,13 @@ void MetersPanel_cleanup(void) {
 }
 
 static void MetersPanel_delete(Object* object) {
-   Panel* super = (Panel*) object;
    MetersPanel* this = (MetersPanel*) object;
-   Panel_done(super);
+   Panel_done(&this->super);
    free(this);
 }
 
 void MetersPanel_setMoving(MetersPanel* this, bool moving) {
-   Panel* super = (Panel*) this;
+   Panel* super = &this->super;
    this->moving = moving;
    ListItem* selected = (ListItem*)Panel_getSelected(super);
    if (selected) {
@@ -64,7 +65,7 @@ void MetersPanel_setMoving(MetersPanel* this, bool moving) {
 }
 
 static inline bool moveToNeighbor(MetersPanel* this, MetersPanel* neighbor, int selected) {
-   Panel* super = (Panel*) this;
+   Panel* super = &this->super;
    if (this->moving) {
       if (neighbor) {
          if (selected < Vector_size(this->meters)) {
@@ -95,62 +96,46 @@ static HandlerResult MetersPanel_eventHandler(Panel* super, int ch) {
       case 0x0a:
       case 0x0d:
       case KEY_ENTER:
-      {
          if (!Vector_size(this->meters))
             break;
          MetersPanel_setMoving(this, !(this->moving));
          result = HANDLED;
          break;
-      }
       case ' ':
       case KEY_F(4):
-      case 't':
-      {
+      case 't': {
          if (!Vector_size(this->meters))
             break;
          Meter* meter = (Meter*) Vector_get(this->meters, selected);
-         int mode = meter->mode + 1;
-         if (mode == LAST_METERMODE)
-            mode = 1;
+         MeterModeId mode = Meter_nextSupportedMode(meter);
          Meter_setMode(meter, mode);
          Panel_set(super, selected, (Object*) Meter_toListItem(meter, this->moving));
          result = HANDLED;
          break;
       }
       case KEY_UP:
-      {
-         if (!this->moving) {
+         if (!this->moving)
             break;
-         }
-      }
          /* else fallthrough */
       case KEY_F(7):
       case '[':
       case '-':
-      {
          Vector_moveUp(this->meters, selected);
          Panel_moveSelectedUp(super);
          result = HANDLED;
          break;
-      }
       case KEY_DOWN:
-      {
-         if (!this->moving) {
+         if (!this->moving)
             break;
-         }
-      }
          /* else fallthrough */
       case KEY_F(8):
       case ']':
       case '+':
-      {
          Vector_moveDown(this->meters, selected);
          Panel_moveSelectedDown(super);
          result = HANDLED;
          break;
-      }
       case KEY_RIGHT:
-      {
          sideMove = moveToNeighbor(this, this->rightNeighbor, selected);
          if (this->moving && !sideMove) {
             // lock user here until it exits positioning-mode
@@ -159,18 +144,15 @@ static HandlerResult MetersPanel_eventHandler(Panel* super, int ch) {
          // if user is free, don't set HANDLED;
          // let ScreenManager handle focus.
          break;
-      }
       case KEY_LEFT:
-      {
          sideMove = moveToNeighbor(this, this->leftNeighbor, selected);
          if (this->moving && !sideMove) {
             result = HANDLED;
          }
          break;
-      }
       case KEY_F(9):
       case KEY_DC:
-      {
+      case KEY_DEL_MAC:
          if (!Vector_size(this->meters))
             break;
          if (selected < Vector_size(this->meters)) {
@@ -180,8 +162,8 @@ static HandlerResult MetersPanel_eventHandler(Panel* super, int ch) {
          MetersPanel_setMoving(this, false);
          result = HANDLED;
          break;
-      }
    }
+
    if (result == HANDLED || sideMove) {
       Header* header = this->scr->header;
       this->settings->changed = true;
@@ -189,6 +171,7 @@ static HandlerResult MetersPanel_eventHandler(Panel* super, int ch) {
       Header_calculateHeight(header);
       ScreenManager_resize(this->scr);
    }
+
    return result;
 }
 
@@ -202,7 +185,8 @@ const PanelClass MetersPanel_class = {
 
 MetersPanel* MetersPanel_new(Settings* settings, const char* header, Vector* meters, ScreenManager* scr) {
    MetersPanel* this = AllocThis(MetersPanel);
-   Panel* super = (Panel*) this;
+   Panel* super = &this->super;
+
    FunctionBar* fuBar = FunctionBar_new(MetersFunctions, MetersKeys, MetersEvents);
    if (!Meters_movingBar) {
       Meters_movingBar = FunctionBar_new(MetersMovingFunctions, MetersMovingKeys, MetersMovingEvents);

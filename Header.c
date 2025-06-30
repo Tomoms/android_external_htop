@@ -5,6 +5,8 @@ Released under the GNU GPLv2+, see the COPYING file
 in the source distribution for its full text.
 */
 
+#include "config.h" // IWYU pragma: keep
+
 #include "Header.h"
 
 #include <assert.h>
@@ -22,15 +24,15 @@ in the source distribution for its full text.
 #include "Object.h"
 #include "Platform.h"
 #include "ProvideCurses.h"
+#include "Settings.h"
 #include "XUtils.h"
 
 
-Header* Header_new(ProcessList* pl, Settings* settings, HeaderLayout hLayout) {
+Header* Header_new(Machine* host, HeaderLayout hLayout) {
    Header* this = xCalloc(1, sizeof(Header));
    this->columns = xMallocArray(HeaderLayout_getColumns(hLayout), sizeof(Vector*));
-   this->settings = settings;
-   this->pl = pl;
    this->headerLayout = hLayout;
+   this->host = host;
 
    Header_forEachColumn(this, i) {
       this->columns[i] = Vector_new(Class(Meter), true, DEFAULT_SIZE);
@@ -84,15 +86,15 @@ static void Header_addMeterByName(Header* this, const char* name, MeterModeId mo
    unsigned int param = 0;
    size_t nameLen;
    if (paren) {
-      int ok = sscanf(paren, "(%10u)", &param); // CPUMeter
-      if (!ok) {
+      if (sscanf(paren, "(%10u)", &param) != 1) { // not CPUMeter
          char dynamic[32] = {0};
-         if (sscanf(paren, "(%30s)", dynamic)) { // DynamicMeter
+         if (sscanf(paren, "(%30s)", dynamic) == 1) { // DynamicMeter
             char* end;
             if ((end = strrchr(dynamic, ')')) == NULL)
                return;    // htoprc parse failure
             *end = '\0';
-            if (!DynamicMeter_search(this->pl->dynamicMeters, dynamic, &param))
+            const Settings* settings = this->host->settings;
+            if (!DynamicMeter_search(settings->dynamicMeters, dynamic, &param))
                return;    // name lookup failure
          } else {
             param = 0;
@@ -105,7 +107,7 @@ static void Header_addMeterByName(Header* this, const char* name, MeterModeId mo
 
    for (const MeterClass* const* type = Platform_meterTypes; *type; type++) {
       if (0 == strncmp(name, (*type)->name, nameLen) && (*type)->name[nameLen] == '\0') {
-         Meter* meter = Meter_new(this->pl, param, *type);
+         Meter* meter = Meter_new(this->host, param, *type);
          if (mode != 0) {
             Meter_setMode(meter, mode);
          }
@@ -116,10 +118,11 @@ static void Header_addMeterByName(Header* this, const char* name, MeterModeId mo
 }
 
 void Header_populateFromSettings(Header* this) {
-   Header_setLayout(this, this->settings->hLayout);
+   const Settings* settings = this->host->settings;
+   Header_setLayout(this, settings->hLayout);
 
    Header_forEachColumn(this, col) {
-      const MeterColumnSetting* colSettings = &this->settings->hColumns[col];
+      const MeterColumnSetting* colSettings = &settings->hColumns[col];
       Vector_prune(this->columns[col]);
       for (size_t i = 0; i < colSettings->len; i++) {
          Header_addMeterByName(this, colSettings->names[i], colSettings->modes[i], col);
@@ -130,10 +133,11 @@ void Header_populateFromSettings(Header* this) {
 }
 
 void Header_writeBackToSettings(const Header* this) {
-   Settings_setHeaderLayout(this->settings, this->headerLayout);
+   Settings* settings = this->host->settings;
+   Settings_setHeaderLayout(settings, this->headerLayout);
 
    Header_forEachColumn(this, col) {
-      MeterColumnSetting* colSettings = &this->settings->hColumns[col];
+      MeterColumnSetting* colSettings = &settings->hColumns[col];
 
       if (colSettings->names) {
          for (size_t j = 0; j < colSettings->len; j++)
@@ -145,15 +149,15 @@ void Header_writeBackToSettings(const Header* this) {
       const Vector* vec = this->columns[col];
       int len = Vector_size(vec);
 
-      colSettings->names = len ? xCalloc(len + 1, sizeof(char*)) : NULL;
-      colSettings->modes = len ? xCalloc(len, sizeof(int)) : NULL;
+      colSettings->names = len ? xCalloc(len + 1, sizeof(*colSettings->names)) : NULL;
+      colSettings->modes = len ? xCalloc(len, sizeof(*colSettings->modes)) : NULL;
       colSettings->len = len;
 
       for (int i = 0; i < len; i++) {
          const Meter* meter = (Meter*) Vector_get(vec, i);
          char* name;
          if (meter->param && As_Meter(meter) == &DynamicMeter_class) {
-            const char* dynamic = DynamicMeter_lookup(this->pl->dynamicMeters, meter->param);
+            const char* dynamic = DynamicMeter_lookup(settings->dynamicMeters, meter->param);
             xAsprintf(&name, "%s(%s)", As_Meter(meter)->name, dynamic);
          } else if (meter->param && As_Meter(meter) == &CPUMeter_class) {
             xAsprintf(&name, "%s(%u)", As_Meter(meter)->name, meter->param);
@@ -171,7 +175,7 @@ Meter* Header_addMeterByClass(Header* this, const MeterClass* type, unsigned int
 
    Vector* meters = this->columns[column];
 
-   Meter* meter = Meter_new(this->pl, param, type);
+   Meter* meter = Meter_new(this->host, param, type);
    Vector_add(meters, meter);
    return meter;
 }
@@ -273,7 +277,8 @@ static int calcColumnWidthCount(const Header* this, const Meter* curMeter, const
 }
 
 int Header_calculateHeight(Header* this) {
-   const int pad = this->settings->headerMargin ? 2 : 0;
+   const Settings* settings = this->host->settings;
+   const int pad = settings->headerMargin ? 2 : 0;
    int maxHeight = pad;
 
    Header_forEachColumn(this, col) {
@@ -294,7 +299,7 @@ int Header_calculateHeight(Header* this) {
       this->pad = pad;
    }
 
-   if (this->settings->screenTabs) {
+   if (settings->screenTabs) {
       maxHeight++;
    }
 

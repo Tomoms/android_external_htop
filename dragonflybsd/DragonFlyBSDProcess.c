@@ -21,7 +21,7 @@ in the source distribution for its full text.
 const ProcessFieldData Process_fields[LAST_PROCESSFIELD] = {
    [0] = { .name = "", .title = NULL, .description = NULL, .flags = 0, },
    [PID] = { .name = "PID", .title = "PID", .description = "Process/thread ID", .flags = 0, .pidColumn = true, },
-   [COMM] = { .name = "Command", .title = "Command ", .description = "Command line", .flags = 0, },
+   [COMM] = { .name = "Command", .title = "Command ", .description = "Command line (insert as last column only)", .flags = 0, },
    [STATE] = { .name = "STATE", .title = "S ", .description = "Process state (S sleeping (<20s), I Idle, Q Queued for Run, R running, D disk, Z zombie, T traced, W paging, B Blocked, A AskedPage, C Core, J Jailed)", .flags = 0, },
    [PPID] = { .name = "PPID", .title = "PPID", .description = "Parent process ID", .flags = 0, .pidColumn = true, },
    [PGRP] = { .name = "PGRP", .title = "PGRP", .description = "Process group ID", .flags = 0, .pidColumn = true, },
@@ -38,7 +38,7 @@ const ProcessFieldData Process_fields[LAST_PROCESSFIELD] = {
    [M_VIRT] = { .name = "M_VIRT", .title = " VIRT ", .description = "Total program size in virtual memory", .flags = 0, .defaultSortDesc = true, },
    [M_RESIDENT] = { .name = "M_RESIDENT", .title = "  RES ", .description = "Resident set size, size of the text and data sections, plus stack usage", .flags = 0, .defaultSortDesc = true, },
    [ST_UID] = { .name = "ST_UID", .title = "UID", .description = "User ID of the process owner", .flags = 0, },
-   [PERCENT_CPU] = { .name = "PERCENT_CPU", .title = " CPU%", .description = "Percentage of the CPU time the process used in the last sampling", .flags = 0, .defaultSortDesc = true, .autoWidth = true, },
+   [PERCENT_CPU] = { .name = "PERCENT_CPU", .title = " CPU%", .description = "Percentage of the CPU time the process used in the last sampling", .flags = 0, .defaultSortDesc = true, .autoWidth = true, .autoTitleRightAlign = true, },
    [PERCENT_NORM_CPU] = { .name = "PERCENT_NORM_CPU", .title = "NCPU%", .description = "Normalized percentage of the CPU time the process used in the last sampling (normalized by cpu count)", .flags = 0, .defaultSortDesc = true, .autoWidth = true, },
    [PERCENT_MEM] = { .name = "PERCENT_MEM", .title = "MEM% ", .description = "Percentage of the memory the process is using, based on resident memory size", .flags = 0, .defaultSortDesc = true, },
    [USER] = { .name = "USER", .title = "USER       ", .description = "Username of the process owner (or user ID if name cannot be determined)", .flags = 0, },
@@ -52,11 +52,11 @@ const ProcessFieldData Process_fields[LAST_PROCESSFIELD] = {
    [JAIL] = { .name = "JAIL", .title = "JAIL        ", .description = "Jail prison name", .flags = 0, },
 };
 
-Process* DragonFlyBSDProcess_new(const Settings* settings) {
+Process* DragonFlyBSDProcess_new(const Machine* host) {
    DragonFlyBSDProcess* this = xCalloc(1, sizeof(DragonFlyBSDProcess));
    Object_setClass(this, Class(DragonFlyBSDProcess));
-   Process_init(&this->super, settings);
-   return &this->super;
+   Process_init(&this->super, host);
+   return (Process*)this;
 }
 
 void Process_delete(Object* cast) {
@@ -66,20 +66,24 @@ void Process_delete(Object* cast) {
    free(this);
 }
 
-static void DragonFlyBSDProcess_writeField(const Process* this, RichString* str, ProcessField field) {
-   const DragonFlyBSDProcess* fp = (const DragonFlyBSDProcess*) this;
+static void DragonFlyBSDProcess_rowWriteField(const Row* super, RichString* str, ProcessField field) {
+   const Process* this = (const Process*) super;
+   const DragonFlyBSDProcess* fp = (const DragonFlyBSDProcess*) super;
+
    char buffer[256]; buffer[255] = '\0';
    int attr = CRT_colors[DEFAULT_COLOR];
    size_t n = sizeof(buffer) - 1;
+
    switch (field) {
    // add Platform-specific fields here
-   case PID: xSnprintf(buffer, n, "%*d ", Process_pidDigits, Process_isKernelThread(this) ? -1 : this->pid); break;
+   case PID: xSnprintf(buffer, n, "%*d ", Process_pidDigits, Process_isKernelThread(this) ? -1 : Process_getPid(this)); break;
    case JID: xSnprintf(buffer, n, "%*d ", Process_pidDigits, fp->jid); break;
-   case JAIL: Process_printLeftAlignedField(str, attr, fp->jname, 11); return;
+   case JAIL: Row_printLeftAlignedField(str, attr, fp->jname, 11); return;
    default:
-      Process_writeField(this, str, field);
+      Process_writeField(&fp->super, str, field);
       return;
    }
+
    RichString_appendWide(str, attr, buffer);
 }
 
@@ -100,11 +104,18 @@ static int DragonFlyBSDProcess_compareByKey(const Process* v1, const Process* v2
 
 const ProcessClass DragonFlyBSDProcess_class = {
    .super = {
-      .extends = Class(Process),
-      .display = Process_display,
-      .delete = Process_delete,
-      .compare = Process_compare
+      .super = {
+         .extends = Class(Process),
+         .display = Row_display,
+         .delete = Process_delete,
+         .compare = Process_compare
+      },
+      .isHighlighted = Process_rowIsHighlighted,
+      .isVisible = Process_rowIsVisible,
+      .matchesFilter = Process_rowMatchesFilter,
+      .compareByParent = Process_compareByParent,
+      .sortKeyString = Process_rowGetSortKey,
+      .writeField = DragonFlyBSDProcess_rowWriteField
    },
-   .writeField = DragonFlyBSDProcess_writeField,
    .compareByKey = DragonFlyBSDProcess_compareByKey
 };

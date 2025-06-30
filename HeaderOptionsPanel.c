@@ -5,6 +5,8 @@ Released under the GNU GPLv2+, see the COPYING file
 in the source distribution for its full text.
 */
 
+#include "config.h" // IWYU pragma: keep
+
 #include "HeaderOptionsPanel.h"
 
 #include <assert.h>
@@ -23,9 +25,8 @@ in the source distribution for its full text.
 static const char* const HeaderOptionsFunctions[] = {"      ", "      ", "      ", "      ", "      ", "      ", "      ", "      ", "      ", "Done  ", NULL};
 
 static void HeaderOptionsPanel_delete(Object* object) {
-   Panel* super = (Panel*) object;
    HeaderOptionsPanel* this = (HeaderOptionsPanel*) object;
-   Panel_done(super);
+   Panel_done(&this->super);
    free(this);
 }
 
@@ -33,30 +34,30 @@ static HandlerResult HeaderOptionsPanel_eventHandler(Panel* super, int ch) {
    HeaderOptionsPanel* this = (HeaderOptionsPanel*) super;
 
    HandlerResult result = IGNORED;
-   int mark;
 
    switch (ch) {
-   case 0x0a:
-   case 0x0d:
-   case KEY_ENTER:
-   case KEY_MOUSE:
-   case KEY_RECLICK:
-   case ' ':
-      mark = Panel_getSelectedIndex(super);
-      assert(mark >= 0);
-      assert(mark < LAST_HEADER_LAYOUT);
+      case 0x0a:
+      case 0x0d:
+      case KEY_ENTER:
+      case KEY_MOUSE:
+      case KEY_RECLICK:
+      case ' ': {
+         int mark = Panel_getSelectedIndex(super);
+         assert(mark >= 0);
+         assert(mark < LAST_HEADER_LAYOUT);
 
-      for (int i = 0; i < LAST_HEADER_LAYOUT; i++)
-         CheckItem_set((CheckItem*)Panel_get(super, i), false);
-      CheckItem_set((CheckItem*)Panel_get(super, mark), true);
+         for (int i = 0; i < LAST_HEADER_LAYOUT; i++)
+            CheckItem_set((CheckItem*)Panel_get(super, i), false);
+         CheckItem_set((CheckItem*)Panel_get(super, mark), true);
 
-      Header_setLayout(this->scr->header, mark);
-      this->settings->changed = true;
-      this->settings->lastUpdate++;
+         Header_setLayout(this->scr->header, mark);
+         this->settings->changed = true;
+         this->settings->lastUpdate++;
 
-      ScreenManager_resize(this->scr);
+         ScreenManager_resize(this->scr);
 
-      result = HANDLED;
+         result = HANDLED;
+      }
    }
 
    return result;
@@ -72,7 +73,8 @@ const PanelClass HeaderOptionsPanel_class = {
 
 HeaderOptionsPanel* HeaderOptionsPanel_new(Settings* settings, ScreenManager* scr) {
    HeaderOptionsPanel* this = AllocThis(HeaderOptionsPanel);
-   Panel* super = (Panel*) this;
+   Panel* super = &this->super;
+
    FunctionBar* fuBar = FunctionBar_new(HeaderOptionsFunctions, NULL, NULL);
    Panel_init(super, 1, 1, 1, 1, Class(CheckItem), true, fuBar);
 
